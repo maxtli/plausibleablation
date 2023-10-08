@@ -1,15 +1,33 @@
+# %%
 import einops
 from fancy_einsum import einsum
+from einops import rearrange, repeat
 from dataclasses import dataclass
 from transformer_lens import HookedTransformer
 import torch
 import torch.nn as nn
 import numpy as np
 import math
-from transformer_lens.utils import get_corner, gelu_new, tokenize_and_concatenate
 import tqdm.auto as tqdm
 
 # reference_gpt2 = HookedTransformer.from_pretrained("gpt2-small", fold_ln=False, center_unembed=False, center_writing_weights=False)
+
+# %%
+
+def gelu_new(
+    input
+):
+    # Implementation of GeLU used by GPT2 - subtly different from PyTorch's
+    return (
+        0.5
+        * input
+        * (
+            1.0
+            + torch.tanh(
+                np.sqrt(2.0 / np.pi) * (input + 0.044715 * torch.pow(input, 3.0))
+            )
+        )
+    )
 
 @dataclass
 class Config:
@@ -24,6 +42,8 @@ class Config:
     n_heads: int = 12
     n_layers: int = 12
 
+cfg = Config()
+
 class LayerNorm(nn.Module):
     def __init__(self, cfg):
         super().__init__()
@@ -31,12 +51,16 @@ class LayerNorm(nn.Module):
         self.w = nn.Parameter(torch.ones(cfg.d_model))
         self.b = nn.Parameter(torch.zeros(cfg.d_model))
 
-    def forward(self, residual):
+    def forward(self, residual, parallel=True):
         # residual: [batch, position, d_model]
         if self.cfg.debug: print("Residual:", residual.shape)
-        residual = residual - einops.reduce(residual, "batch position d_model -> batch position 1", "mean")
+        if parallel:
+            pattern = "batch n_heads position d_model -> batch n_heads position 1"
+        else:
+            pattern = "batch position d_model -> batch position 1"
+        residual = residual - einops.reduce(residual, pattern, "mean")
         # Calculate the variance, square root it. Add in an epsilon to prevent divide by zero.
-        scale = (einops.reduce(residual.pow(2), "batch position d_model -> batch position 1", "mean") + cfg.layer_norm_eps).sqrt()
+        scale = (einops.reduce(residual.pow(2), pattern, "mean") + self.cfg.layer_norm_eps).sqrt()
         normalized = residual / scale
         normalized = normalized * self.w + self.b
         if self.cfg.debug: print("Normalized:", residual.shape)
@@ -91,25 +115,46 @@ class Attention(nn.Module):
 
         self.register_buffer("IGNORE", torch.tensor(-1e5, dtype=torch.float32, device="cuda"))
 
-    def forward(self, normalized_resid_pre):
+    def apply_attention(self, normalized_resid_pre):
         # normalized_resid_pre: [batch, position, d_model]
         if self.cfg.debug: print("Normalized_resid_pre:", normalized_resid_pre.shape)
 
-        q = einsum("batch query_pos d_model, n_heads d_model d_head -> batch query_pos n_heads d_head", normalized_resid_pre, self.W_Q) + self.b_Q
-        k = einsum("batch key_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", normalized_resid_pre, self.W_K) + self.b_K
+        q = einsum("batch n_prev_head query_pos d_model, n_heads d_model d_head -> batch n_prev_head query_pos n_heads d_head", normalized_resid_pre, self.W_Q) + self.b_Q
+        k = einsum("batch n_prev_head key_pos d_model, n_heads d_model d_head -> batch n_prev_head key_pos n_heads d_head", normalized_resid_pre, self.W_K) + self.b_K
 
-        attn_scores = einsum("batch query_pos n_heads d_head, batch key_pos n_heads d_head -> batch n_heads query_pos key_pos", q, k)
+        attn_scores = einsum("batch n_prev_head query_pos n_heads d_head, batch n_prev_head key_pos n_heads d_head -> batch n_prev_head n_heads query_pos key_pos", q, k)
         attn_scores = attn_scores / math.sqrt(self.cfg.d_head)
         attn_scores = self.apply_causal_mask(attn_scores)
 
         pattern = attn_scores.softmax(dim=-1) # [batch, n_head, query_pos, key_pos]
 
-        v = einsum("batch key_pos d_model, n_heads d_model d_head -> batch key_pos n_heads d_head", normalized_resid_pre, self.W_V) + self.b_V
+        v = einsum("batch n_prev_head key_pos d_model, n_heads d_model d_head -> batch n_prev_head key_pos n_heads d_head", normalized_resid_pre, self.W_V) + self.b_V
 
-        z = einsum("batch n_heads query_pos key_pos, batch key_pos n_heads d_head -> batch query_pos n_heads d_head", pattern, v)
+        z = einsum("batch n_prev_head n_heads query_pos key_pos, batch n_prev_head key_pos n_heads d_head -> batch n_prev_head query_pos n_heads d_head", pattern, v)
 
-        attn_out = einsum("batch query_pos n_heads d_head, n_heads d_head d_model -> batch query_pos d_model", z, self.W_O) + self.b_O
+        attn_out = einsum("batch n_prev_head query_pos n_heads d_head, n_heads d_head d_model -> batch n_prev_head query_pos n_heads d_model", z, self.W_O)
         return attn_out
+
+    def forward(self, normalized_resid_pre, alt_normalized_resid_pre):
+        # normalized_resid_pre: [batch, position, d_model]
+        attention_input = torch.cat([normalized_resid_pre, torch.unsqueeze(alt_normalized_resid_pre, dim=1)], dim=1)
+
+        attention_output = self.apply_attention(attention_input)
+        old_ablated_attention = torch.sum(attention_output, dim=-2)
+
+        orig_attention_output = attention_output[:, [1]]
+        alt_attention_output = attention_output[:,[0]]
+
+        n_heads = self.cfg.n_heads
+        ablate_mtrx = torch.ones((n_heads, n_heads)) - torch.eye(n_heads)
+        # rearrange: batch query_pos n_heads d_model -> batch n_heads query_pos d_model
+        new_ablated_attention = einsum(
+            "batch query_pos n_heads d_model, keep_heads n_heads -> batch keep_heads query_pos d_model", orig_attention_output, ablate_mtrx
+        ) + rearrange(
+            alt_attention_output, "bqnd -> bnqd"
+        )
+
+        return torch.cat([old_ablated_attention, new_ablated_attention], dim=1) + self.b_O
 
     def apply_causal_mask(self, attn_scores):
         # attn_scores: [batch, n_heads, query_pos, key_pos]
@@ -131,9 +176,9 @@ class MLP(nn.Module):
     def forward(self, normalized_resid_mid):
         # normalized_resid_mid: [batch, position, d_model]
         if self.cfg.debug: print("Normalized_resid_mid:", normalized_resid_mid.shape)
-        pre = einsum("batch position d_model, d_model d_mlp -> batch position d_mlp", normalized_resid_mid, self.W_in) + self.b_in
+        pre = einsum("batch n_heads position d_model, d_model d_mlp -> batch n_heads position d_mlp", normalized_resid_mid, self.W_in) + self.b_in
         post = gelu_new(pre)
-        mlp_out = einsum("batch position d_mlp, d_mlp d_model -> batch position d_model", post, self.W_out) + self.b_out
+        mlp_out = einsum("batch n_heads position d_mlp, d_mlp d_model -> batch n_heads position d_model", post, self.W_out) + self.b_out
         return mlp_out
 
 class TransformerBlock(nn.Module):
@@ -147,11 +192,12 @@ class TransformerBlock(nn.Module):
         self.mlp = MLP(cfg)
 
     def forward(self, resid_pre):
-        # resid_pre [batch, position, d_model]
+        # resid_pre [batch, n_heads, position, d_model]
         normalized_resid_pre = self.ln1(resid_pre)
         attn_out = self.attn(normalized_resid_pre)
-        resid_mid = resid_pre + attn_out
 
+        resid_mid = torch.cat([resid_pre, repeat(resid_pre[:,1], "bsd -> bnsd", n=self.cfg.n_heads)]) + attn_out
+        
         normalized_resid_mid = self.ln2(resid_mid)
         mlp_out = self.mlp(normalized_resid_mid)
         resid_post = resid_mid + mlp_out
@@ -168,7 +214,7 @@ class Unembed(nn.Module):
     def forward(self, normalized_resid_final):
         # normalized_resid_final [batch, position, d_model]
         if self.cfg.debug: print("Normalized_resid_final:", normalized_resid_final.shape)
-        logits = einsum("batch position d_model, d_model d_vocab -> batch position d_vocab", normalized_resid_final, self.W_U) + self.b_U
+        logits = einsum("batch n_heads position d_model, d_model d_vocab -> batch n_heads position d_vocab", normalized_resid_final, self.W_U) + self.b_U
         return logits
 
 class DemoTransformer(nn.Module):
@@ -181,14 +227,29 @@ class DemoTransformer(nn.Module):
         self.ln_final = LayerNorm(cfg)
         self.unembed = Unembed(cfg)
 
-    def forward(self, tokens):
+    def forward(self, tokens, alt_tokens):
         # tokens [batch, position]
         embed = self.embed(tokens)
         pos_embed = self.pos_embed(tokens)
         residual = embed + pos_embed
+
+        alt_embed = self.embed(alt_tokens)
+        alt_pos_embed = self.pos_embed(alt_tokens)
+        alt_residual = alt_embed + alt_pos_embed
+
+        # in dimension 1, the alt residual is the first elt, followed by the original residual, which is the second elt
+        residual = torch.stack([alt_residual, residual], dim=1)
+
+        # output of each block:
+        # embeddings + alt embeddings
+        # no ablation. apply block to each previous ablated examples. and add new ablated examples.
+        # output:
+        # no ablation + previous ablations + new ablations, and alt with no ablation
         for block in self.blocks:
             residual = block(residual)
+        # shape: no ablation + all ablations + alt no ablation.
         normalized_resid_final = self.ln_final(residual)
+
         logits = self.unembed(normalized_resid_final)
         # logits have shape [batch, position, logits]
         return logits
