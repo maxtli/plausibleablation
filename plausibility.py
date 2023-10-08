@@ -1,7 +1,24 @@
 # %%
-from transformer import load_demo_gpt2 
-from models import import_ablated_model
+from model import load_demo_gpt2, tokenizer
+from data import retrieve_toxic_data, retrieve_owt_data
 # %%
+
+model = load_demo_gpt2()
+
+# %%
+
+toxic_batch_size = 10
+owt_batch_size = 10
+context_length = 20
+# %%
+
+toxic_data_loader = retrieve_toxic_data(toxic_batch_size, context_length, tokenizer)
+owt_data_loader = retrieve_owt_data(owt_batch_size, context_length, tokenizer)
+
+# %%
+
+def sanity_check(model):
+    model(tokens, tokens)
 
 # %%
 
