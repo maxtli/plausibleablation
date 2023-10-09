@@ -17,8 +17,11 @@ context_length = 20
 # importantly, the two should have the same context length
 toxic_data_loader = retrieve_toxic_data(toxic_batch_size, context_length, tokenizer)
 owt_data_loader = retrieve_owt_data(owt_batch_size, context_length, tokenizer)
+kl_loss = torch.nn.KLDivLoss()
 
 # %%
+i_metrics = []
+p_scores = []
 
 for batch in toxic_data_loader:
     owt_batch = next(owt_data_loader)['tokens']
@@ -46,51 +49,64 @@ for batch in toxic_data_loader:
 
     c_weight = LA.norm(orig_norms * alt_gradients + alt_norms * orig_gradients, dim=-1) / orig_norms * alt_norms
 
+    # batch n_heads seq_len
     plausibility_scores = (1 - c_weight) * orig_norms/ (orig_norms + alt_norms)
     
+    # kl_loss(q, p) is KL_div (p || q) = E_p[log q]
+    # here i just use the loss of the alternate estimators wrt. the exact estimator
 
+    # batch n_heads seq_len
+    ce_loss = torch.sum(-1 * alt_probs * orig_probs.log(), dim=-1)
+
+    # kl_div = kl_loss(alt_probs, orig_probs.log(), reduction="none")
+
+    # average over batch and seq_len to get by-head importance
+    total_plausibility = torch.sum(plausibility_scores, dim=[0,2])
+    importance_metric = torch.sum(plausibility_scores * ce_loss, dim=[0,2]) / total_plausibility
+
+    i_metrics.append(importance_metric)
+    p_scores.append(total_plausibility)
+
+#     # sum of loss over the entire sequence
+
+
+# def infer_batch(model, criterion, batch, batch_size, demos, device="cuda"):
+
+#     # cast the entire batch tensor to torch.long
+#     batch = batch.long()
+
+#     # remove start token 
+#     batch = batch[:, 1:]
     
-    
-    # sum of loss over the entire sequence
+#     # concatenate the demos and the batch
+#     # if batch size is < batch_size, remove some demos
+#     if batch.shape[0] < batch_size:
+#         demos = demos[:batch.shape[0]]
+#     input = torch.cat([demos, batch], dim=1)
+
+#     # generate the output
+#     out = model(input)[0]  # 0 is the logits
+
+#     return evaluate_sequence_loss(out, input, criterion, demos.shape[1])
 
 
-def infer_batch(model, criterion, batch, batch_size, demos, device="cuda"):
+# # logits shape: n_heads seq_len vocab_size
+# def sanity_check(model):
+#     for batch in toxic_data_loader:
+#         logits = model(batch, batch)
 
-    # cast the entire batch tensor to torch.long
-    batch = batch.long()
+# # %%
 
-    # remove start token 
-    batch = batch[:, 1:]
-    
-    # concatenate the demos and the batch
-    # if batch size is < batch_size, remove some demos
-    if batch.shape[0] < batch_size:
-        demos = demos[:batch.shape[0]]
-    input = torch.cat([demos, batch], dim=1)
+# # dataloader
 
-    # generate the output
-    out = model(input)[0]  # 0 is the logits
+# # perform inference with batched toxic samples 
+# # perform inference with untoxic samples
+# # perform inference with ablated untoxic samples
+# # take specific untoxic examples from the finetuned model, and perform inference
+# # do this 144x, once for each attention head. do i need to save the indices? (also, ???)
+# # (i guess this is just activation patching)
 
-    return evaluate_sequence_loss(out, input, criterion, demos.shape[1])
+# # do some arithmetic on the output logits
+# # check the ablated loss on the toxic samples
 
-
-# logits shape: n_heads seq_len vocab_size
-def sanity_check(model):
-    for batch in toxic_data_loader:
-        logits = model(batch, batch)
-
-# %%
-
-# dataloader
-
-# perform inference with batched toxic samples 
-# perform inference with untoxic samples
-# perform inference with ablated untoxic samples
-# take specific untoxic examples from the finetuned model, and perform inference
-# do this 144x, once for each attention head. do i need to save the indices? (also, ???)
-# (i guess this is just activation patching)
-
-# do some arithmetic on the output logits
-# check the ablated loss on the toxic samples
-
-# 
+# # 

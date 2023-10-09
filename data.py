@@ -7,7 +7,6 @@ from torch.utils.data import DataLoader
 from transformer_lens.utils import tokenize_and_concatenate
 from torch.utils.data import random_split
 from inference import generate_no_hf
-from detoxify import Detoxify
 
 # %%
 TRAIN_SAMPLES = 100
