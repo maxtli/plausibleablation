@@ -30,6 +30,72 @@ kl_loss = torch.nn.KLDivLoss()
 owt_iter = cycle(owt_data_loader)
 # %%
 
+# marginal resample ablation
+all_losses = []
+for epoch in tqdm(range(20)):
+    for c, batch in enumerate(toxic_data_loader):
+        # print("Batches complete:", batches)
+        # batches += 1
+
+        if batch.shape[0] < toxic_batch_size:
+            continue
+
+        owt_batch = next(owt_iter)['tokens']
+        while owt_batch.shape[0] < batch.shape[0]:
+            owt_batch = next(owt_iter)['tokens']
+
+        # remove start token
+        # randomize the OWT batch
+        batch = batch[:,1:].long().to(DEVICE)
+        owt_batch = owt_batch[torch.randperm(owt_batch.shape[0]), 1:].long().to(DEVICE)
+
+        # shape: batch n_heads (0 alt, 1 original) seq_len vocab_size
+        with torch.no_grad():
+            logits = model(batch, owt_batch)
+        
+        probs = torch.softmax(logits, dim=-1)
+
+        orig_probs = probs[:,[1]]
+        alt_probs = probs[:,2:]
+        
+        # seq_len
+        ce_loss = torch.sum(-1 * alt_probs * orig_probs.log(), dim=-1)
+        all_losses.append(ce_loss)
+
+# %%
+import pickle 
+als = torch.cat(all_losses, dim=0).mean(dim=0).cpu().numpy()
+with open("outputs/resample_losses.pkl", "wb") as f:
+    pickle.dump(als, f)
+
+
+# %%
+# # zero ablation
+# for c, batch in enumerate(toxic_data_loader):
+#     # print("Batches complete:", batches)
+#     # batches += 1
+
+#     if batch.shape[0] < toxic_batch_size:
+#         continue
+
+#     # remove start token
+#     # randomize the OWT batch
+#     batch = batch[:,1:].long().to(DEVICE)
+
+#     # shape: batch n_heads (0 alt, 1 original) seq_len vocab_size
+#     with torch.no_grad():
+#         logits = model(batch, torch.zeros(batch.shape).)
+    
+#     probs = torch.softmax(logits, dim=-1)
+
+#     orig_probs = probs[:,[1]]
+#     alt_probs = probs[:,2:]
+    
+#     # seq_len
+#     ce_loss = torch.sum(-1 * alt_probs * orig_probs.log(), dim=-1)
+#     all_losses.append(ce_loss)
+
+# %%
 all_plausibility_scores = None
 all_c_weights = None
 all_losses = None
@@ -53,7 +119,7 @@ for epoch in tqdm(range(20)):
 
         # shape: batch n_heads (0 alt, 1 original) seq_len vocab_size
         with torch.no_grad():
-            logits = model(owt_batch, batch)
+            logits = model(batch, owt_batch)
         
         probs = torch.softmax(logits, dim=-1)
 
@@ -100,7 +166,7 @@ for epoch in tqdm(range(20)):
 
                 # seq_len
                 plausibility_scores = torch.nan_to_num(
-                    (1 - c_weight) * alt_norms/ (orig_norms + alt_norms),
+                    (1 - c_weight) * orig_norms / (orig_norms + alt_norms),
                     nan=1
                 )
             
