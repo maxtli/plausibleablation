@@ -6,7 +6,7 @@ Utils for inference with toxic and OWT data.
 import torch
 from tqdm import tqdm
 from einops import repeat
-from models import DEVICE
+from model import DEVICE
 
 criterion = torch.nn.CrossEntropyLoss()
 BATCH_SIZE_INFERENCE = 100

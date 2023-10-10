@@ -2,12 +2,9 @@
 import pickle 
 import datasets 
 import torch
+from nanda_utils import tokenize_and_concatenate
 from einops import rearrange
-from torch.utils.data import DataLoader
-from transformer_lens.utils import tokenize_and_concatenate
-from torch.utils.data import random_split
-from inference import generate_no_hf
-
+from torch.utils.data import DataLoader, random_split
 # %%
 TRAIN_SAMPLES = 100
 TEST_SAMPLES = 1000

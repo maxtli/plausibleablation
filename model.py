@@ -21,8 +21,9 @@ ref_model = GPT2LMHeadModel.from_pretrained("gpt2", pad_token_id=tokenizer.eos_t
 ref_model.to(DEVICE)
 
 def load_demo_gpt2():
-    reference_gpt2 = HookedTransformer.from_pretrained("gpt2-small", fold_ln=False, center_unembed=False, center_writing_weights=False)
+    reference_gpt2 = HookedTransformer.from_pretrained("gpt2-small", fold_ln=False, center_unembed=False, center_writing_weights=False, pad_token_id=tokenizer.eos_token_id)
     demo_gpt2 = DemoTransformer(Config(debug=False))
     demo_gpt2.load_state_dict(reference_gpt2.state_dict(), strict=False)
-    demo_gpt2.cuda()
+    demo_gpt2.to(DEVICE)
+    return demo_gpt2
 

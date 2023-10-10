@@ -131,23 +131,23 @@ class Attention(nn.Module):
         attn_out = einsum("batch n_prev_head query_pos n_heads d_head, n_heads d_head d_model -> batch n_prev_head query_pos n_heads d_model", z, self.W_O)
         return attn_out
 
-    def forward(self, normalized_resid_pre, alt_normalized_resid_pre):
+    def forward(self, normalized_resid_pre):
         # normalized_resid_pre: [batch, position, d_model]
-        attention_input = torch.cat([normalized_resid_pre, torch.unsqueeze(alt_normalized_resid_pre, dim=1)], dim=1)
+        # attention_input = torch.cat([normalized_resid_pre, torch.unsqueeze(alt_normalized_resid_pre, dim=1)], dim=1)
 
-        attention_output = self.apply_attention(attention_input)
+        attention_output = self.apply_attention(normalized_resid_pre)
         old_ablated_attention = torch.sum(attention_output, dim=-2)
 
-        orig_attention_output = attention_output[:, [1]]
-        alt_attention_output = attention_output[:,[0]]
+        orig_attention_output = attention_output[:, 1]
+        alt_attention_output = attention_output[:,0]
 
         n_heads = self.cfg.n_heads
         ablate_mtrx = torch.ones((n_heads, n_heads)) - torch.eye(n_heads)
         # rearrange: batch query_pos n_heads d_model -> batch n_heads query_pos d_model
         new_ablated_attention = einsum(
-            "batch query_pos n_heads d_model, keep_heads n_heads -> batch keep_heads query_pos d_model", orig_attention_output, ablate_mtrx
+            "batch query_pos n_heads d_model, keep_heads n_heads -> batch keep_heads query_pos d_model", orig_attention_output, ablate_mtrx.to(next(self.parameters()).device)
         ) + rearrange(
-            alt_attention_output, "bqnd -> bnqd"
+            alt_attention_output, "b q n d -> b n q d"
         )
 
         return torch.cat([old_ablated_attention, new_ablated_attention], dim=1) + self.b_O
@@ -192,7 +192,7 @@ class TransformerBlock(nn.Module):
         normalized_resid_pre = self.ln1(resid_pre)
         attn_out = self.attn(normalized_resid_pre)
 
-        resid_mid = torch.cat([resid_pre, repeat(resid_pre[:,1], "bsd -> bnsd", n=self.cfg.n_heads)]) + attn_out
+        resid_mid = torch.cat([resid_pre, repeat(resid_pre[:,1], "b s d -> b n s d", n=self.cfg.n_heads)], dim=1) + attn_out
         
         normalized_resid_mid = self.ln2(resid_mid)
         mlp_out = self.mlp(normalized_resid_mid)
