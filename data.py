@@ -67,10 +67,10 @@ def retrieve_toxic_train_val(batch_size, ctx_length, tokenizer, val_perc=0.2):
     return train_loader, val_loader
 
 def retrieve_owt_data(batch_size, ctx_length, tokenizer, split="train", from_saved=False):
-    dataset = datasets.load_dataset("NeelNanda/pile-10k", split="train")
+    dataset = datasets.load_dataset("Elriggs/openwebtext-100k", split="train")
     if split == "train":
         # use 80% of the data
-        dataset = dataset.select(range(int(0.8*len(dataset))))
+        dataset = dataset.select(range(int(0.2*len(dataset))))
     elif split == "test":
         # use 20% of the data
         dataset = dataset.select(range(int(0.8*len(dataset)), len(dataset)))
